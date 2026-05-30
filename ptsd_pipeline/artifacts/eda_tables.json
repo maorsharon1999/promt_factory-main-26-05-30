@@ -1,0 +1,60 @@
+﻿{
+  "n_records": 1994,
+  "label_marginals": {
+    "sleep_disturbance": 425,
+    "hypervigilance": 379,
+    "avoidance": 278,
+    "anger_irritability": 252,
+    "emotional_numbing": 180,
+    "intrusive_memories": 171,
+    "functional_impairment": 147,
+    "guilt_shame": 146
+  },
+  "platform_distribution": {
+    "whatsapp": 519,
+    "diary": 510,
+    "tweet": 506,
+    "reddit": 459
+  },
+  "example_type_distribution": {
+    "positive_clear": 700,
+    "implicit": 500,
+    "hard_negative": 495,
+    "ambiguous": 299
+  },
+  "severity_distribution": {
+    "mild": 1048,
+    "medium": 617,
+    "strong": 329
+  },
+  "text_length_stats": {
+    "word_count": {
+      "count": 1994.0,
+      "mean": 17.74,
+      "std": 4.31,
+      "min": 7.0,
+      "25%": 15.0,
+      "50%": 17.0,
+      "75%": 21.0,
+      "max": 39.0
+    },
+    "char_count": {
+      "count": 1994.0,
+      "mean": 89.94,
+      "std": 21.25,
+      "min": 33.0,
+      "25%": 74.0,
+      "50%": 89.0,
+      "75%": 104.0,
+      "max": 206.0
+    }
+  },
+  "label_cardinality_distribution": {
+    "0": 616,
+    "1": 835,
+    "2": 486,
+    "3": 57
+  },
+  "mean_label_cardinality": 0.992,
+  "slang_coverage_rate": 0.4905
+}

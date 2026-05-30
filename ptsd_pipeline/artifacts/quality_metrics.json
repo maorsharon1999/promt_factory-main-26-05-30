@@ -1,0 +1,18 @@
+﻿{
+  "total_generated": 2000,
+  "total_accepted": 1994,
+  "total_rejected": 6,
+  "rejection_rate": 0.003,
+  "per_code_counts": {
+    "UNNATURAL_ROBOTIC": 5,
+    "LABEL_MISMATCH": 1
+  },
+  "per_label_rejection_rate": {
+    "avoidance": 0.0005
+  },
+  "per_platform_rejection_rate": {
+    "diary": 0.001,
+    "tweet": 0.001,
+    "whatsapp": 0.001
+  }
+}
