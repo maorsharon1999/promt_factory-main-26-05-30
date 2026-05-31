@@ -39,11 +39,19 @@ SEED = 1240
 # Closed failure-code taxonomy (plan §1.3)
 FAILURE_CODES = frozenset(
     [
+        # original codes
         "UNNATURAL_ROBOTIC",
         "TRANSLATIONESE",
         "CLINICAL_LEAK",
         "LABEL_MISMATCH",
         "SLANG_MISUSE",
+        # deterministic pre-filter codes
+        "ARTIFACT_PREFIX",
+        "MIXED_SCRIPT",
+        "GIBBERISH_SHORT",
+        # scored rubric codes
+        "LOW_NATURALNESS",
+        "INCOHERENT",
     ]
 )
 
@@ -51,6 +59,15 @@ FAILURE_CODES = frozenset(
 _REJECTION_RATE_HIGH = 0.35
 _TEMP_MIN = 0.1
 _TEMP_MAX = 1.0
+
+# Import strictness knobs from config (can be overridden per-run via env/config edits)
+from src.config import (
+    JUDGE_MIN_WORDS,
+    JUDGE_MAX_LATIN_RATIO,
+    JUDGE_RUBRIC_MIN_SCORE,
+    JUDGE_ARTIFACT_PREFIXES,
+    JUDGE_CACHE_VERSION,
+)
 
 # System role for the judge — sets evaluation persona before any Hebrew text is seen
 _JUDGE_SYSTEM = (
@@ -60,10 +77,12 @@ _JUDGE_SYSTEM = (
     "You ALWAYS output ONLY a valid JSON object — no prose, no markdown, no explanation outside the JSON."
 )
 
-# User turn for the G-Eval judge — CoT steps inside the user message
+# User turn for the G-Eval judge — scored rubric (Python decides verdict, not the model).
+# No pre-filled verdict in the example to avoid anchoring the model toward ACCEPT.
 _JUDGE_PROMPT_TEMPLATE = """\
-Evaluate the following synthetic Hebrew utterance for quality issues.
-Follow ALL steps in order, then output ONLY the JSON object shown at the end.
+You are evaluating a synthetic Hebrew utterance for quality.
+Score each dimension 1-5 (1=very poor, 5=excellent), then answer the boolean flags.
+Output ONLY the JSON object at the end — no text before or after the braces.
 
 === CANDIDATE ===
 text: {text}
@@ -73,34 +92,52 @@ slang_used: {slang_used}
 severity: {severity}
 =================
 
-STEP 1 - RESTATE: Quote the text verbatim in one line.
+SCORING DIMENSIONS (1-5 each):
 
-STEP 2 - REGISTER CHECK: Does the tone / length / style match platform={platform}? Note any mismatch.
+naturalness:
+  5 = a native Israeli speaker would write this without any hesitation
+  3 = slightly awkward but intelligible
+  1 = gibberish, word-salad, or clearly machine-translated
 
-STEP 3 - CLINICAL LEAK CHECK: Does the text contain any of these diagnostic terms?
-  PTSD, trauma, post-trauma, disorder, diagnosis, psychiatrist, psychologist,
-  or their Hebrew equivalents (טראומה, פוסט-טראומה, הפרעת דחק, אבחנה, פסיכיאטר).
-  If yes -> add code CLINICAL_LEAK.
+idiomaticity:
+  5 = no English calques, no translationese, fully natural colloquial Hebrew
+  3 = one mild calque or slightly stiff phrasing
+  1 = multiple literal English translations or unidiomatic phrasing
 
-STEP 4 - TRANSLATIONESE CHECK: Are there literal English calques or unidiomatic phrasing
-  no native Hebrew speaker would naturally say? If yes -> add code TRANSLATIONESE.
+register_fit:
+  5 = tone, length, and style perfectly fit platform="{platform}"
+  3 = minor mismatch (e.g. slightly too formal for a tweet)
+  1 = completely wrong register (e.g. clinical report style in a WhatsApp message)
 
-STEP 5 - ROBOTIC CHECK: Are ALL FOUR of these true simultaneously?
-  (a) opener is "מאז ש...", (b) token count < 8, (c) slang_used is empty, (d) severity != "mild".
-  If ALL four -> add code UNNATURAL_ROBOTIC.
+label_grounding:
+  5 = every label in {labels} has clear behavioral/emotional/cognitive/somatic evidence in the text
+      (if labels list is empty this is N/A — always score 5)
+  3 = partial evidence for some labels
+  1 = no textual evidence for one or more labels
 
-STEP 6 - LABEL CHECK: For each label in {labels}, does the text contain at least one
-  behavioral/emotional/cognitive/somatic cue supporting it?
-  If any label has NO textual evidence -> add code LABEL_MISMATCH.
-  (Empty labels list is valid for hard-negatives, do not flag it.)
+coherence:
+  5 = reads as a single meaningful Hebrew thought or passage
+  3 = mostly coherent with one confusing part
+  1 = disconnected fragments with no meaningful flow
 
-STEP 7 - SLANG CHECK: For each token in slang_used={slang_used}, is it used naturally
-  as an Israeli soldier or veteran would use it? If not -> add code SLANG_MISUSE.
+BOOLEAN FLAGS:
 
-STEP 8 - VERDICT: If failure_codes is empty -> "ACCEPT". Otherwise -> "REJECT".
+clinical_leak:
+  true if the text contains any of: PTSD, trauma, post-trauma, disorder, diagnosis,
+  psychiatrist, psychologist, or Hebrew equivalents
+  (טראומה, פוסט-טראומה, הפרעת דחק, אבחנה, פסיכיאטר, פסיכולוג).
+  Otherwise false.
 
-OUTPUT (JSON only — no text before or after the braces):
-{{"reasoning": "<one paragraph in English summarizing your reasoning>", "failure_codes": [], "verdict": "ACCEPT"}}
+slang_natural:
+  true if every token in slang_used={slang_used} is used naturally as an Israeli
+  soldier or veteran would use it (empty list -> true).
+  false if any slang token feels forced, misplaced, or incorrect.
+
+OUTPUT (JSON only, no prose outside the braces):
+{{"reasoning": "<one paragraph in English>",
+  "scores": {{"naturalness": 3, "idiomaticity": 3, "register_fit": 3, "label_grounding": 3, "coherence": 3}},
+  "clinical_leak": false,
+  "slang_natural": true}}
 """
 
 # ---------------------------------------------------------------------------
@@ -176,6 +213,81 @@ class QualityFilterMetrics:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic pre-filter (no LLM call required)
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+# Hebrew Unicode block: U+0590–U+05FF
+_HEBREW_RE = _re.compile(r"[֐-׿]")
+_LATIN_RE  = _re.compile(r"[A-Za-z]")
+# A "real" Hebrew word = token containing at least 2 Hebrew letters
+_HEB_WORD_RE = _re.compile(r"[֐-׿]{2,}")
+
+
+def normalize_text(text: str) -> str:
+    """
+    Strip known generator artifacts from text before evaluation.
+
+    Currently strips leading '---' markers produced by the Stage 1 generator.
+    The cleaned text is used for all quality checks but the *original* text
+    field in the record is NOT mutated — callers must use the return value.
+    """
+    cleaned = text.strip()
+    for prefix in JUDGE_ARTIFACT_PREFIXES:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+            # strip an optional leading quote that sometimes follows the marker
+            if cleaned.startswith('"'):
+                cleaned = cleaned[1:].rstrip('"').strip()
+            break
+    return cleaned
+
+
+def prefilter_record(record: dict) -> "JudgeVerdict | None":
+    """
+    Fast deterministic quality gate — runs before any LLM call.
+
+    Strips generator artifacts first (e.g. leading '---'), then checks the
+    cleaned text for mixed-script and gibberish issues.
+
+    Returns a REJECT JudgeVerdict when an obvious defect remains after
+    cleaning, or None when the record should proceed to the LLM rubric.
+    """
+    raw_text: str = record.get("text", "")
+    cleaned = normalize_text(raw_text)
+
+    # 1. After stripping artifact prefix, check mixed-script
+    n_hebrew = len(_HEBREW_RE.findall(cleaned))
+    n_latin  = len(_LATIN_RE.findall(cleaned))
+    total_letters = n_hebrew + n_latin
+    if total_letters > 0 and n_latin / total_letters > JUDGE_MAX_LATIN_RATIO:
+        ratio = n_latin / total_letters
+        return JudgeVerdict(
+            verdict="REJECT",
+            failure_codes=["MIXED_SCRIPT"],
+            reasoning=(
+                f"[PRE-FILTER] Latin-letter ratio {ratio:.1%} exceeds "
+                f"threshold {JUDGE_MAX_LATIN_RATIO:.0%}."
+            ),
+        )
+
+    # 2. Too few real Hebrew words (gibberish / too short)
+    heb_words = _HEB_WORD_RE.findall(cleaned)
+    if len(heb_words) < JUDGE_MIN_WORDS:
+        return JudgeVerdict(
+            verdict="REJECT",
+            failure_codes=["GIBBERISH_SHORT"],
+            reasoning=(
+                f"[PRE-FILTER] Only {len(heb_words)} real Hebrew words "
+                f"(threshold {JUDGE_MIN_WORDS})."
+            ),
+        )
+
+    return None  # passes pre-filter — proceed to LLM rubric
+
+
+# ---------------------------------------------------------------------------
 # SHA1 verdict cache
 # ---------------------------------------------------------------------------
 
@@ -202,17 +314,31 @@ def _save_cache(cache: dict[str, dict], cache_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Mapping from rubric dimension name to failure code when score is too low
+_DIMENSION_TO_CODE: dict[str, str] = {
+    "naturalness":      "LOW_NATURALNESS",
+    "idiomaticity":     "TRANSLATIONESE",
+    "register_fit":     "UNNATURAL_ROBOTIC",
+    "label_grounding":  "LABEL_MISMATCH",
+    "coherence":        "INCOHERENT",
+}
+
+
 def _parse_verdict(raw: str) -> JudgeVerdict:
-    """Extract JudgeVerdict from raw LLM output, tolerating prose wrapping."""
+    """
+    Extract JudgeVerdict from scored-rubric LLM output.
+
+    Python decides ACCEPT/REJECT based on scores — the model never emits a verdict.
+    Falls back to REJECT with GIBBERISH_SHORT on parse failure.
+    """
     # Strip markdown fences if present
     raw = re.sub(r"```(?:json)?", "", raw).strip()
     # Find first { ... } block
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
-        # Fallback: treat as REJECT with parse error
         return JudgeVerdict(
             verdict="REJECT",
-            failure_codes=["UNNATURAL_ROBOTIC"],
+            failure_codes=["GIBBERISH_SHORT"],
             reasoning=f"[PARSE ERROR] Could not extract JSON from: {raw[:200]}",
         )
     try:
@@ -220,29 +346,41 @@ def _parse_verdict(raw: str) -> JudgeVerdict:
     except json.JSONDecodeError as exc:
         return JudgeVerdict(
             verdict="REJECT",
-            failure_codes=["UNNATURAL_ROBOTIC"],
+            failure_codes=["GIBBERISH_SHORT"],
             reasoning=f"[JSON DECODE ERROR] {exc} — raw: {raw[:200]}",
         )
 
-    raw_codes = obj.get("failure_codes", [])
-    # Sanitize: only keep recognized codes
-    codes = [c for c in raw_codes if c in FAILURE_CODES]
+    reasoning = str(obj.get("reasoning", ""))
+    codes: list[str] = []
 
-    raw_verdict = str(obj.get("verdict", "")).upper()
-    verdict: Literal["ACCEPT", "REJECT"] = (
-        "ACCEPT" if raw_verdict == "ACCEPT" else "REJECT"
-    )
-    # If codes were emitted but verdict says ACCEPT, override to REJECT
-    if codes and verdict == "ACCEPT":
-        verdict = "REJECT"
-    # If no codes but verdict says REJECT, add a generic code
-    if not codes and verdict == "REJECT":
-        codes = ["UNNATURAL_ROBOTIC"]
+    # --- score-based checks ---
+    scores: dict = obj.get("scores", {})
+    for dim, code in _DIMENSION_TO_CODE.items():
+        score = scores.get(dim)
+        if score is None:
+            # Missing dimension treated as worst case
+            codes.append(code)
+            continue
+        try:
+            if int(score) < JUDGE_RUBRIC_MIN_SCORE:
+                codes.append(code)
+        except (TypeError, ValueError):
+            codes.append(code)
+
+    # --- boolean flag checks ---
+    if obj.get("clinical_leak") is True:
+        codes.append("CLINICAL_LEAK")
+
+    if obj.get("slang_natural") is False:
+        codes.append("SLANG_MISUSE")
+
+    # Python decides verdict — model's opinion ignored
+    verdict: Literal["ACCEPT", "REJECT"] = "REJECT" if codes else "ACCEPT"
 
     return JudgeVerdict(
         verdict=verdict,
         failure_codes=codes,
-        reasoning=str(obj.get("reasoning", "")),
+        reasoning=reasoning,
     )
 
 
@@ -299,9 +437,16 @@ class JudgeGeminiClient:
                 wait = 5 * (attempt + 1)
                 logger.warning("judge retry %d/3 — %s: %s — waiting %ds", attempt + 1, type(exc).__name__, exc, wait)
                 time.sleep(wait)
-        # Return a parse-safe ACCEPT fallback after 3 failures so pipeline continues
+        # Return a rubric-format ACCEPT fallback after 3 failures so pipeline continues.
+        # All scores = 5 ensures _parse_verdict returns ACCEPT (no codes emitted).
+        # Flip scores to 1 here if you want timeouts to REJECT instead.
         logger.warning("judge SKIP — 3 retries exhausted: %s", last_exc)
-        return '{"reasoning": "SKIP — LLM timeout after 3 retries", "failure_codes": [], "verdict": "ACCEPT"}'
+        return (
+            '{"reasoning": "SKIP — LLM timeout after 3 retries",'
+            ' "scores": {"naturalness": 5, "idiomaticity": 5, "register_fit": 5,'
+            ' "label_grounding": 5, "coherence": 5},'
+            ' "clinical_leak": false, "slang_natural": true}'
+        )
 
 
 def judge_record(
@@ -310,24 +455,43 @@ def judge_record(
     cache: dict[str, dict],
 ) -> JudgeVerdict:
     """
-    Run G-Eval judge on a single dataset record.
+    Run quality gate on a single dataset record.
 
-    Uses SHA1 cache to avoid re-calling the LLM for identical texts.
-    Preserves original variable names: client matches factory usage.
+    Order:
+      1. Deterministic pre-filter (no LLM, cheap).
+      2. SHA1+version cache lookup.
+      3. Scored LLM rubric (Python decides verdict).
+
+    Cache keys are namespaced with JUDGE_CACHE_VERSION so bumping the version
+    in config.py invalidates old lenient verdicts without deleting the cache file.
     """
     text = record.get("text", "")
     sha = _text_sha1(text)
+    cache_key = f"{JUDGE_CACHE_VERSION}:{sha}"
 
-    if sha in cache:
-        cached = cache[sha]
+    # 1. Deterministic pre-filter — free, no API call needed
+    pre = prefilter_record(record)
+    if pre is not None:
+        # Cache the deterministic result too (cheap to re-compute but keeps metrics consistent)
+        cache[cache_key] = {
+            "verdict": pre.verdict,
+            "failure_codes": pre.failure_codes,
+            "reasoning": pre.reasoning,
+        }
+        return pre
+
+    # 2. Cache lookup (versioned)
+    if cache_key in cache:
+        cached = cache[cache_key]
         return JudgeVerdict(
             verdict=cached["verdict"],
             failure_codes=cached["failure_codes"],
             reasoning=cached["reasoning"],
         )
 
+    # 3. Scored LLM rubric — use normalized text (artifact prefix stripped)
     prompt = _JUDGE_PROMPT_TEMPLATE.format(
-        text=text,
+        text=normalize_text(text),
         platform=record.get("platform", ""),
         labels=record.get("labels", []),
         slang_used=record.get("slang_used", []),
@@ -337,7 +501,7 @@ def judge_record(
     raw = client.generate(prompt)
     verdict = _parse_verdict(raw)
 
-    cache[sha] = {
+    cache[cache_key] = {
         "verdict": verdict.verdict,
         "failure_codes": verdict.failure_codes,
         "reasoning": verdict.reasoning,

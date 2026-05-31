@@ -111,9 +111,9 @@ def load_data(
                 "Run 'python run_pipeline.py' or src/splitting.py first to produce the split."
             )
 
-    with train_path.open(encoding="utf-8") as fh:
+    with train_path.open(encoding="utf-8-sig") as fh:
         train_data = json.load(fh)
-    with test_path.open(encoding="utf-8") as fh:
+    with test_path.open(encoding="utf-8-sig") as fh:
         test_data = json.load(fh)
 
     logger.info(

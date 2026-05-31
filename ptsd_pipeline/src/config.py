@@ -48,6 +48,14 @@ QUALITY_METRICS_PATH: Path = ARTIFACTS_DIR / "quality_metrics.json"
 JUDGE_CACHE_PATH: Path     = ARTIFACTS_DIR / "judge_cache.json"
 JUDGE_FEEDBACK_PATH: Path  = ARTIFACTS_DIR / "judge_feedback.json"
 
+# Judge strictness knobs — tune pass rate without editing quality_judge.py logic.
+# JUDGE_RUBRIC_MIN_SCORE: 3 = gentle (~90% pass), 4 = moderate (~80%), 5 = aggressive (~60%)
+JUDGE_MIN_WORDS: int                    = 5       # reject if fewer than N real Hebrew words
+JUDGE_MAX_LATIN_RATIO: float            = 0.10    # reject if >10% of letters are Latin
+JUDGE_RUBRIC_MIN_SCORE: int             = 4       # each 1-5 rubric dim must score >= this
+JUDGE_ARTIFACT_PREFIXES: tuple          = ("---",)  # leading junk markers -> reject
+JUDGE_CACHE_VERSION: str                = "v2"    # bump to invalidate old lenient verdicts
+
 # ---------------------------------------------------------------------------
 # Stage 3 — EDA
 # ---------------------------------------------------------------------------

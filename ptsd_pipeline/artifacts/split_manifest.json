@@ -2,34 +2,34 @@
   "seed": 1240,
   "test_size": 0.25,
   "n_total": 1994,
-  "n_train": 1496,
-  "n_test": 498,
-  "actual_test_ratio": 0.2497,
-  "js_divergence_train_test": 0.0048,
+  "n_train": 1495,
+  "n_test": 499,
+  "actual_test_ratio": 0.2503,
+  "js_divergence_train_test": 0.0,
   "per_label_ratios": {
     "anger_irritability": {
       "total": 252,
-      "train": 191,
-      "test": 61,
-      "train_share": 0.7579
+      "train": 189,
+      "test": 63,
+      "train_share": 0.75
     },
     "avoidance": {
       "total": 278,
-      "train": 206,
-      "test": 72,
-      "train_share": 0.741
+      "train": 209,
+      "test": 69,
+      "train_share": 0.7518
     },
     "emotional_numbing": {
       "total": 180,
-      "train": 129,
-      "test": 51,
-      "train_share": 0.7167
+      "train": 135,
+      "test": 45,
+      "train_share": 0.75
     },
     "functional_impairment": {
       "total": 147,
-      "train": 102,
-      "test": 45,
-      "train_share": 0.6939
+      "train": 110,
+      "test": 37,
+      "train_share": 0.7483
     },
     "guilt_shame": {
       "total": 146,
@@ -39,24 +39,24 @@
     },
     "hypervigilance": {
       "total": 379,
-      "train": 304,
-      "test": 75,
-      "train_share": 0.8021
+      "train": 284,
+      "test": 95,
+      "train_share": 0.7493
     },
     "intrusive_memories": {
       "total": 171,
-      "train": 134,
-      "test": 37,
-      "train_share": 0.7836
+      "train": 128,
+      "test": 43,
+      "train_share": 0.7485
     },
     "sleep_disturbance": {
       "total": 425,
-      "train": 340,
-      "test": 85,
-      "train_share": 0.8
+      "train": 319,
+      "test": 106,
+      "train_share": 0.7506
     }
   },
-  "stratifier": "random_fallback",
-  "skmultilearn_version": "unknown",
+  "stratifier": "iterative_train_test_split",
+  "skmultilearn_version": "0.2.0",
   "neg_class_used_for_stratification": "__NEG__"
 }
